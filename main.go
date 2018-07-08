@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/google/gopacket"
@@ -24,9 +25,34 @@ const (
 
 var ciphersClients map[uint16]int
 var ciphersServers map[uint16]int
-var alerts map[byte]int
+var alerts map[uint16]int
 var tlsVersionsClients map[uint16]int
 var tlsVersionsServers map[uint16]int
+
+type uint16IntPair struct {
+	Key   uint16
+	Value int
+}
+type uint16IntPairList []uint16IntPair
+
+func (p uint16IntPairList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p uint16IntPairList) Len() int           { return len(p) }
+func (p uint16IntPairList) Less(i, j int) bool { return p[i].Value > p[j].Value }
+
+/*
+ * Function turns map[uint16]int into sorted array
+ * of key value pairs.
+ */
+func uint16IntPairSort(m map[uint16]int) uint16IntPairList {
+	p := make(uint16IntPairList, len(m))
+	i := 0
+	for k, v := range m {
+		p[i] = uint16IntPair{k, v}
+		i++
+	}
+	sort.Sort(p)
+	return p
+}
 
 func translateCipher(cipher uint16) string {
 	if Ciphers[cipher] != "" {
@@ -35,7 +61,7 @@ func translateCipher(cipher uint16) string {
 	return fmt.Sprintf("[UNKNOWN CIPHER 0x%04X]", cipher)
 }
 
-func translateAlert(alert byte) string {
+func translateAlert(alert uint16) string {
 	if Alerts[alert] != "" {
 		return Alerts[alert]
 	}
@@ -69,18 +95,14 @@ func handlePacket(packet gopacket.Packet) {
 		if len(payload) >= 5 {
 			// Make sure we have a TLS record here.
 			if payload[0] == tlsRecordHandshake {
-
-				// Make sure to only consider Handshake_CLIENT_HELLO messages at the end of TLS negotiation (in handshake layer)
-				// Find out where handshake layer starts. Length in TLS record layer tells us
-				// where record layer ends and where handshake layer starts
-				//TLSHeaderLength := binary.BigEndian.Uint16(payload[3:5])
-				//fmt.Println("TLS Record header length:", TLSHeaderLength)
-
 				// See if message type in handshake layer is TLSRecordHandshakeClientHello
 				TLSRecordHandshakeMessageType := payload[5]
 
+				/*
+				 * If TLS handshake HELLO is CLIENT_HELLO
+				 */
 				if TLSRecordHandshakeMessageType == tlsRecordHandshakeClientHello {
-					// TLS in Handshake layer
+					// TLS version in Handshake layer
 					TLSHandshakeLayerVersion := binary.BigEndian.Uint16(payload[9:11]) // Catch two bytes and interpret as single number (0xXXXX)
 
 					tlsVersionsClients[TLSHandshakeLayerVersion]++
@@ -144,7 +166,7 @@ func handlePacket(packet gopacket.Packet) {
 				// Alerts need to have length 2 bytes
 				if tlsAlertLength == 2 {
 					tlsAlertDescription := payload[6]
-					alerts[tlsAlertDescription]++
+					alerts[uint16(tlsAlertDescription)]++
 				}
 			}
 		}
@@ -157,7 +179,7 @@ func main() {
 	ciphersServers = make(map[uint16]int)
 	tlsVersionsClients = make(map[uint16]int)
 	tlsVersionsServers = make(map[uint16]int)
-	alerts = make(map[byte]int)
+	alerts = make(map[uint16]int)
 
 	// Get pcap file flag
 	var argPcapFile = flag.String("d", "tcpdump.pcap", "Path to .pcap file.")
@@ -177,15 +199,16 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\n\n%d packets analyzed. Here are the results:\n\n", pkgctr)
+	fmt.Printf("%d packets analyzed. Here are the results:\n\n", pkgctr)
 
 	/*
 	 * Show TLS versions
 	 */
 	// Client TLS versions (available)
 	fmt.Println("=== TLS versions supported by clients ===")
-	for tlsversion := range tlsVersionsClients {
-		fmt.Fprintf(tab, "%s\t\t%d\n", translateTLSVersions(tlsversion), tlsVersionsClients[tlsversion])
+	tlsVersionsClientsSorted := uint16IntPairSort(tlsVersionsClients)
+	for _, tlsversionPair := range tlsVersionsClientsSorted {
+		fmt.Fprintf(tab, "%s\t\t%d\n", translateTLSVersions(tlsversionPair.Key), tlsversionPair.Value)
 	}
 	tab.Flush() // Write table
 
@@ -193,8 +216,9 @@ func main() {
 
 	// Server TLS versions
 	fmt.Println("=== TLS versions chosen by server ===")
-	for tlsversion := range tlsVersionsServers {
-		fmt.Fprintf(tab, "%s\t\t%d\n", translateTLSVersions(tlsversion), tlsVersionsServers[tlsversion])
+	tlsVersionsServersSorted := uint16IntPairSort(tlsVersionsServers)
+	for _, tlsversionPair := range tlsVersionsServersSorted {
+		fmt.Fprintf(tab, "%s\t\t%d\n", translateTLSVersions(tlsversionPair.Key), tlsversionPair.Value)
 	}
 	tab.Flush() // Write table
 
@@ -205,18 +229,21 @@ func main() {
 	 */
 	// Client ciphers (available)
 	fmt.Println("=== Ciphers supported by clients: ===")
-	for cipher := range ciphersClients {
-		fmt.Fprintf(tab, "%s\t\t%d\n", translateCipher(cipher), ciphersClients[cipher])
+	ciphersClientsSorted := uint16IntPairSort(ciphersClients)
+	for _, cipherPair := range ciphersClientsSorted {
+		fmt.Fprintf(tab, "%s\t\t%d\n", translateCipher(cipherPair.Key), cipherPair.Value)
 	}
 	tab.Flush() // Write table
 
 	fmt.Println()
 
 	// Server ciphers (chosen)
-	fmt.Println("=== Ciphers chosen by server: ===")
-	for cipher := range ciphersServers {
-		fmt.Fprintf(tab, "%s\t\t%d\n", translateCipher(cipher), ciphersServers[cipher])
+	fmt.Println("=== Ciphers chosen by server ===")
+	ciphersServersSorted := uint16IntPairSort(ciphersServers)
+	for _, cipherPair := range ciphersServersSorted {
+		fmt.Fprintf(tab, "%s\t\t%d\n", translateCipher(cipherPair.Key), cipherPair.Value)
 	}
+
 	tab.Flush() // Write table
 
 	fmt.Println()
@@ -226,8 +253,9 @@ func main() {
 	 */
 
 	fmt.Println("=== TLS alerts ===")
-	for alert := range alerts {
-		fmt.Fprintf(tab, "%s\t\t%d\n", translateAlert(alert), alerts[alert])
+	alertsSorted := uint16IntPairSort(alerts)
+	for _, alertPair := range alertsSorted {
+		fmt.Fprintf(tab, "%s\t\t%d\n", translateAlert(alertPair.Key), alertPair.Value)
 	}
 	tab.Flush()
 }
